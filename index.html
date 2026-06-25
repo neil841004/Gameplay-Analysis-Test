@@ -386,6 +386,15 @@
                     if (canCharge) {
                         this.isAiming = true;
 
+                        // 按下 Skill 啟動瞄準/蓄力時，中斷當下的 Melee：關閉其 Hitbox 與揮砍特效
+                        if (this.melee.state !== 'IDLE') {
+                            this.melee.state = 'IDLE';
+                            this.melee.stateStartTime = now;
+                            this.melee.comboIndex = 0;
+                            this.melee.triggerMove = false;
+                            this.melee.hasHit = true;
+                        }
+
                         // 瞄準更新
                         if (this.id === 'P1') this.angle = Math.atan2(state.mouse.y - this.y, state.mouse.x - this.x);
                         else {
