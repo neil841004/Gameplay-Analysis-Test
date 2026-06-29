@@ -397,6 +397,7 @@
                 };
                 this.recoil = { x: 0, y: 0 }; this.recoilStartTime = 0; this.postDelay = 0;
                 this.shotSquashStartTime = 0; this.shotSquashAmount = 0;
+                this.shotFacingAngle = 0; this.shotFacingLockUntil = 0;
                 this.coffeeUntil = 0;
                 this.isAiming = false;
                 this.isCharging = false; this.chargeValue = 0;
@@ -409,7 +410,9 @@
                 let isDashing = now < this.dashActiveUntil || this.dashProgress < 1;
                 const hasCoffee = now < this.coffeeUntil;
                 const recoilElapsed = now - this.recoilStartTime;
-                const isStunnedByRecoil = recoilElapsed < this.postDelay;
+                let isStunnedByRecoil = recoilElapsed < this.postDelay;
+                let isShotFacingLocked = now < this.shotFacingLockUntil;
+                if (isShotFacingLocked) this.angle = this.shotFacingAngle;
 
                 // 1. 精力回覆 (蓄力滿門檻時鎖住精力)
                 const isHoldingCharge = isSkillPressed && this.stamina >= CONFIG.skillCostBlade;
@@ -419,7 +422,7 @@
                 }
 
                 // 2. 蓄力技能邏輯 (Shooter版)
-                if (isSkillPressed && now - this.lastSkillTime > CONFIG.skillCD) {
+                if (!isShotFacingLocked && isSkillPressed && now - this.lastSkillTime > CONFIG.skillCD) {
                     const canAim = this.stamina >= CONFIG.skillCostNormal || hasCoffee;
                     const canCharge = this.stamina >= CONFIG.skillCostBlade || hasCoffee;
 
@@ -490,6 +493,8 @@
                         if (fired) {
                             this.recoil.x = -Math.cos(this.angle) * rMag; this.recoil.y = -Math.sin(this.angle) * rMag;
                             this.recoilStartTime = now; this.postDelay = pDelay;
+                            this.shotFacingAngle = this.angle; this.shotFacingLockUntil = now + pDelay;
+                            isStunnedByRecoil = true; isShotFacingLocked = true;
                             this.triggerShotSquash(now, this.chargeValue > 0.9 ? CONFIG.shotSquashCharged : CONFIG.shotSquashNormal);
                         }
                         this.lastSkillTime = now;
@@ -597,7 +602,7 @@
                     moveX = meleeMoveX; moveY = meleeMoveY;
                     this.moveSpeed = 0;
                 } else if (inputDx !== 0 || inputDy !== 0) {
-                    if (!this.isCharging) this.angle = Math.atan2(inputDy, inputDx);
+                    if (!this.isCharging && !isShotFacingLocked) this.angle = Math.atan2(inputDy, inputDx);
                     const len = Math.sqrt(inputDx * inputDx + inputDy * inputDy);
                     this.moveSpeed = Math.min(CONFIG.baseSpeed, this.moveSpeed + CONFIG.moveAcceleration * dtFactor);
                     moveX = (inputDx / len) * this.moveSpeed * dtFactor; moveY = (inputDy / len) * this.moveSpeed * dtFactor;
@@ -606,6 +611,7 @@
                 }
                 moveX += this.recoil.x * dtFactor; moveY += this.recoil.y * dtFactor;
                 this.resolveMovement(moveX, moveY);
+                if (isShotFacingLocked) this.angle = this.shotFacingAngle;
                 this.recoil.x *= Math.pow(0.85, dtFactor); this.recoil.y *= Math.pow(0.85, dtFactor);
                 this.updateBodyScale(now, isDashing);
 
@@ -628,7 +634,7 @@
                 this.dashActiveUntil = now + CONFIG.dashDuration;
                 this.dashProgress = 0;
                 this.dashDir = normalizeVector(dir.x, dir.y);
-                if (!this.isAiming && !this.isCharging) this.angle = Math.atan2(this.dashDir.y, this.dashDir.x);
+                if (!this.isAiming && !this.isCharging && now >= this.shotFacingLockUntil) this.angle = Math.atan2(this.dashDir.y, this.dashDir.x);
                 this.addAfterimage(now, 0.65);
                 createDashEffect(this.x, this.y, this.dashDir.x, this.dashDir.y, this.color, this.radius, 1);
             }
@@ -647,7 +653,7 @@
                 this.dashProgress = Math.max(this.dashProgress, progress);
                 if (this.dashProgress >= 1) this.dashActiveUntil = 0;
 
-                if (!this.isAiming && !this.isCharging) this.angle = Math.atan2(this.dashDir.y, this.dashDir.x);
+                if (!this.isAiming && !this.isCharging && now >= this.shotFacingLockUntil) this.angle = Math.atan2(this.dashDir.y, this.dashDir.x);
                 if (distanceDelta > 0) {
                     const speedScale = dashSpeedScale(this.dashProgress);
                     createDashEffect(this.x, this.y, this.dashDir.x, this.dashDir.y, this.color, this.radius, speedScale);
