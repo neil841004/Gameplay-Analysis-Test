@@ -144,10 +144,19 @@
             meleeLastHitIdleCooldown: 50,
 
             // 衝刺 (Dash) 參數
-            dashSpeed: 14,
-            dashDuration: 270,
+            dashDuration: 200,
+            dashDistance: 165,
+            dashTurnRate: 0.085,
             dashCD: 1000,
             dashStaminaCost: 0,
+            moveAcceleration: 0.78,
+            dashStretch: 0.32,
+            dashSquashDuration: 360,
+            afterimageLife: 180,
+            afterimageInterval: 34,
+            shotSquashNormal: 0.16,
+            shotSquashCharged: 0.32,
+            shotSquashDuration: 260,
             staminaRegen: 0.25,
 
             // 環境參數
@@ -166,6 +175,33 @@
                 x: Math.max(rx, Math.min(px, rx + rw)),
                 y: Math.max(ry, Math.min(py, ry + rh))
             };
+        }
+
+        function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+        function easeInSine(t) { return 1 - Math.cos(clamp01(t) * Math.PI / 2); }
+        function easeOutSine(t) { return Math.sin(clamp01(t) * Math.PI / 2); }
+        function dashSpeedScale(t) { return 1 - easeInSine(t); }
+        function dampedPulse(t, cycles, damping) { return Math.cos(clamp01(t) * Math.PI * 2 * cycles) * Math.exp(-clamp01(t) * damping); }
+
+        function normalizeVector(x, y) {
+            const len = Math.hypot(x, y);
+            if (len <= 0.0001) return { x: 0, y: 0 };
+            return { x: x / len, y: y / len };
+        }
+
+        function angleDelta(target, current) {
+            let diff = target - current;
+            while (diff < -Math.PI) diff += Math.PI * 2;
+            while (diff > Math.PI) diff -= Math.PI * 2;
+            return diff;
+        }
+
+        function rotateVectorTowards(current, target, maxTurn) {
+            const currentAngle = Math.atan2(current.y, current.x);
+            const targetAngle = Math.atan2(target.y, target.x);
+            const diff = angleDelta(targetAngle, currentAngle);
+            const nextAngle = currentAngle + Math.max(-maxTurn, Math.min(maxTurn, diff));
+            return { x: Math.cos(nextAngle), y: Math.sin(nextAngle) };
         }
 
         /**
@@ -348,6 +384,9 @@
                 this.radius = 22; this.angle = 0;
                 this.hp = CONFIG.playerMaxHp; this.stamina = CONFIG.playerMaxStamina;
                 this.lastDashTime = 0; this.dashActiveUntil = 0;
+                this.dashStartTime = 0; this.dashProgress = 1; this.dashDir = { x: 1, y: 0 };
+                this.dashVisualStartTime = -9999; this.lastAfterimageTime = 0; this.afterimages = [];
+                this.moveSpeed = 0;
                 this.lastSkillTime = 0;
                 this.melee = {
                     state: 'IDLE', comboIndex: 0, attackStartTime: 0, stateStartTime: 0,
@@ -357,6 +396,7 @@
                     intendedMoveDir: { x: 0, y: 0 }
                 };
                 this.recoil = { x: 0, y: 0 }; this.recoilStartTime = 0; this.postDelay = 0;
+                this.shotSquashStartTime = 0; this.shotSquashAmount = 0;
                 this.coffeeUntil = 0;
                 this.isAiming = false;
                 this.isCharging = false; this.chargeValue = 0;
@@ -366,7 +406,7 @@
 
             update(inputDx, inputDy, isDashPressed, isMeleePressed, isSkillPressed, target, dtFactor) {
                 const now = Date.now();
-                const isDashing = now < this.dashActiveUntil;
+                let isDashing = now < this.dashActiveUntil || this.dashProgress < 1;
                 const hasCoffee = now < this.coffeeUntil;
                 const recoilElapsed = now - this.recoilStartTime;
                 const isStunnedByRecoil = recoilElapsed < this.postDelay;
@@ -450,6 +490,7 @@
                         if (fired) {
                             this.recoil.x = -Math.cos(this.angle) * rMag; this.recoil.y = -Math.sin(this.angle) * rMag;
                             this.recoilStartTime = now; this.postDelay = pDelay;
+                            this.triggerShotSquash(now, this.chargeValue > 0.9 ? CONFIG.shotSquashCharged : CONFIG.shotSquashNormal);
                         }
                         this.lastSkillTime = now;
                     }
@@ -461,7 +502,10 @@
 
                 // 3. 其他行為與移動
                 if (isDashPressed && now - this.lastDashTime > CONFIG.dashCD && !isStunnedByRecoil && (this.stamina >= CONFIG.dashStaminaCost || hasCoffee)) {
-                    this.lastDashTime = now; this.dashActiveUntil = now + CONFIG.dashDuration;
+                    const inputDir = normalizeVector(inputDx, inputDy);
+                    const dashDir = inputDir.x !== 0 || inputDir.y !== 0 ? inputDir : { x: Math.cos(this.angle), y: Math.sin(this.angle) };
+                    this.startDash(now, dashDir);
+                    isDashing = true;
                     if (!hasCoffee) this.stamina = Math.max(0, this.stamina - CONFIG.dashStaminaCost);
                     this.melee.state = 'IDLE'; // 衝刺可中斷 Melee
                 }
@@ -545,17 +589,25 @@
                 }
 
                 let moveX = 0, moveY = 0;
-                if (isMeleeActive) {
+                if (isDashing) {
+                    const dashMove = this.getDashMovement(now, inputDx, inputDy, dtFactor);
+                    moveX = dashMove.x; moveY = dashMove.y;
+                    this.moveSpeed = 0;
+                } else if (isMeleeActive) {
                     moveX = meleeMoveX; moveY = meleeMoveY;
+                    this.moveSpeed = 0;
                 } else if (inputDx !== 0 || inputDy !== 0) {
                     if (!this.isCharging) this.angle = Math.atan2(inputDy, inputDx);
-                    const speed = isDashing ? CONFIG.dashSpeed : CONFIG.baseSpeed;
                     const len = Math.sqrt(inputDx * inputDx + inputDy * inputDy);
-                    moveX = (inputDx / len) * speed * dtFactor; moveY = (inputDy / len) * speed * dtFactor;
+                    this.moveSpeed = Math.min(CONFIG.baseSpeed, this.moveSpeed + CONFIG.moveAcceleration * dtFactor);
+                    moveX = (inputDx / len) * this.moveSpeed * dtFactor; moveY = (inputDy / len) * this.moveSpeed * dtFactor;
+                } else {
+                    this.moveSpeed = 0;
                 }
                 moveX += this.recoil.x * dtFactor; moveY += this.recoil.y * dtFactor;
                 this.resolveMovement(moveX, moveY);
                 this.recoil.x *= Math.pow(0.85, dtFactor); this.recoil.y *= Math.pow(0.85, dtFactor);
+                this.updateBodyScale(now, isDashing);
 
                 // 道具拾取
                 for (let i = state.drops.length - 1; i >= 0; i--) {
@@ -566,6 +618,72 @@
                         state.drops.splice(i, 1); createImpactEffect(this.x, this.y, drop.type === 'HEART' ? '#f472b6' : '#fbbf24', 8);
                     }
                 }
+            }
+
+            startDash(now, dir) {
+                this.lastDashTime = now;
+                this.dashStartTime = now;
+                this.dashVisualStartTime = now;
+                this.lastAfterimageTime = 0;
+                this.dashActiveUntil = now + CONFIG.dashDuration;
+                this.dashProgress = 0;
+                this.dashDir = normalizeVector(dir.x, dir.y);
+                if (!this.isAiming && !this.isCharging) this.angle = Math.atan2(this.dashDir.y, this.dashDir.x);
+                this.addAfterimage(now, 0.65);
+                createDashEffect(this.x, this.y, this.dashDir.x, this.dashDir.y, this.color, this.radius, 1);
+            }
+
+            getDashMovement(now, inputDx, inputDy, dtFactor) {
+                const inputDir = normalizeVector(inputDx, inputDy);
+                if (inputDir.x !== 0 || inputDir.y !== 0) {
+                    this.dashDir = rotateVectorTowards(this.dashDir, inputDir, CONFIG.dashTurnRate * dtFactor);
+                }
+
+                const progress = clamp01((now - this.dashStartTime) / CONFIG.dashDuration);
+                const prevDistance = CONFIG.dashDistance * easeOutSine(this.dashProgress);
+                const nextDistance = CONFIG.dashDistance * easeOutSine(progress);
+                const distanceDelta = Math.max(0, nextDistance - prevDistance);
+
+                this.dashProgress = Math.max(this.dashProgress, progress);
+                if (this.dashProgress >= 1) this.dashActiveUntil = 0;
+
+                if (!this.isAiming && !this.isCharging) this.angle = Math.atan2(this.dashDir.y, this.dashDir.x);
+                if (distanceDelta > 0) {
+                    const speedScale = dashSpeedScale(this.dashProgress);
+                    createDashEffect(this.x, this.y, this.dashDir.x, this.dashDir.y, this.color, this.radius, speedScale);
+                }
+                return { x: this.dashDir.x * distanceDelta, y: this.dashDir.y * distanceDelta };
+            }
+
+            triggerShotSquash(now, amount) {
+                this.shotSquashStartTime = now;
+                this.shotSquashAmount = amount;
+            }
+
+            updateBodyScale(now, isDashing) {
+                const dashT = clamp01((now - this.dashVisualStartTime) / CONFIG.dashSquashDuration);
+                const dashActiveVisual = dashT < 1;
+                const dashStretch = dashActiveVisual ? CONFIG.dashStretch * dampedPulse(dashT, 1.05, 2.35) : 0;
+                const shotProgress = clamp01((now - this.shotSquashStartTime) / CONFIG.shotSquashDuration);
+                const shotSquash = this.shotSquashAmount * dampedPulse(shotProgress, 1.0, 2.6);
+                if (shotProgress >= 1) this.shotSquashAmount = 0;
+
+                this.scaleX = Math.max(0.68, Math.min(1.38, 1 + dashStretch - shotSquash));
+                this.scaleY = Math.max(0.68, Math.min(1.38, 1 - dashStretch * 0.82 + shotSquash * 0.88));
+
+                if (isDashing && now - this.lastAfterimageTime >= CONFIG.afterimageInterval) {
+                    this.addAfterimage(now, 0.45 + dashSpeedScale(this.dashProgress) * 0.25);
+                }
+            }
+
+            addAfterimage(now, alpha) {
+                this.lastAfterimageTime = now;
+                this.afterimages.push({
+                    x: this.x, y: this.y, angle: this.angle,
+                    scaleX: this.scaleX, scaleY: this.scaleY,
+                    alpha, time: now
+                });
+                if (this.afterimages.length > 8) this.afterimages.shift();
             }
 
             resolveMovement(mx, my) {
@@ -639,7 +757,10 @@
             }
 
             draw() {
-                ctx.save(); ctx.translate(this.x, this.y); const now = Date.now();
+                const now = Date.now();
+                this.drawAfterimages(now);
+
+                ctx.save(); ctx.translate(this.x, this.y);
 
                 if (this.melee.state === 'ATTACK' || this.melee.state === 'RECOVERY') {
                     const def = CONFIG.meleeCombo[this.melee.comboIndex];
@@ -669,9 +790,35 @@
                     ctx.fillStyle = arrowColor; ctx.fill(); ctx.restore();
                 }
 
-                ctx.rotate(this.angle); ctx.scale(this.scaleX, this.scaleY); ctx.fillStyle = this.color;
+                this.drawBodyShape(1, 1);
+                ctx.restore(); this.drawBars();
+            }
+
+            drawAfterimages(now) {
+                for (let i = this.afterimages.length - 1; i >= 0; i--) {
+                    const ghost = this.afterimages[i];
+                    const age = now - ghost.time;
+                    if (age >= CONFIG.afterimageLife) {
+                        this.afterimages.splice(i, 1);
+                        continue;
+                    }
+                    const alpha = ghost.alpha * (1 - age / CONFIG.afterimageLife);
+                    ctx.save();
+                    ctx.translate(ghost.x, ghost.y);
+                    ctx.globalAlpha = alpha;
+                    this.drawBodyShape(0.65, 0.35, ghost.angle, ghost.scaleX, ghost.scaleY);
+                    ctx.restore();
+                }
+            }
+
+            drawBodyShape(fillAlpha, strokeAlpha, angle = this.angle, scaleX = this.scaleX, scaleY = this.scaleY) {
+                ctx.rotate(angle); ctx.scale(scaleX, scaleY);
+                ctx.fillStyle = this.color;
+                ctx.globalAlpha *= fillAlpha;
                 ctx.beginPath(); ctx.moveTo(this.radius, 0); ctx.lineTo(-this.radius * 0.7, -this.radius); ctx.lineTo(-this.radius * 0.4, 0); ctx.lineTo(-this.radius * 0.7, this.radius); ctx.closePath();
-                ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke(); ctx.restore(); this.drawBars();
+                ctx.fill();
+                ctx.globalAlpha *= strokeAlpha / Math.max(fillAlpha, 0.001);
+                ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
             }
 
             drawBars() {
@@ -751,6 +898,41 @@
 
         function createImpactEffect(x, y, color, count) { for (let i = 0; i < count; i++) { state.particles.push({ x, y, vx: (Math.random() - 0.5) * 8, vy: (Math.random() - 0.5) * 8, radius: Math.random() * 5 + 2, alpha: 1, color, decay: 0.02 }); } }
 
+        function createDashEffect(x, y, dx, dy, color, radius, intensity) {
+            const amount = clamp01(intensity);
+            if (amount <= 0.03) return;
+            const nx = -dy, ny = dx;
+            const count = Math.ceil(2 + amount * 4);
+            if (amount > 0.92) {
+                state.particles.push({
+                    type: 'ring',
+                    x: x - dx * radius * 0.25,
+                    y: y - dy * radius * 0.25,
+                    vx: 0, vy: 0,
+                    radius: radius * 0.75,
+                    alpha: 0.55,
+                    color,
+                    decay: 0.08,
+                    growth: 2.8
+                });
+            }
+            for (let i = 0; i < count; i++) {
+                const side = (Math.random() - 0.5) * radius * 1.15;
+                const back = radius * 0.6 + Math.random() * radius * 1.6;
+                state.particles.push({
+                    type: 'dashSpark',
+                    x: x - dx * back + nx * side,
+                    y: y - dy * back + ny * side,
+                    vx: -dx * (0.7 + Math.random() * 1.4) + nx * (Math.random() - 0.5) * 0.9,
+                    vy: -dy * (0.7 + Math.random() * 1.4) + ny * (Math.random() - 0.5) * 0.9,
+                    radius: 2 + Math.random() * 4 * amount,
+                    alpha: 0.25 + amount * 0.35,
+                    color: Math.random() > 0.45 ? color : '#fff',
+                    decay: 0.055 + Math.random() * 0.025
+                });
+            }
+        }
+
         function createChargeEffect(x, y, color, radius) {
             const angle = Math.random() * Math.PI * 2;
             const dist = radius + Math.random() * 20;
@@ -774,7 +956,22 @@
             ctx.strokeStyle = '#1e1e1e'; for (let i = 0; i < canvas.width; i += 50) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, canvas.height); ctx.stroke(); }
             state.buildings.forEach(b => b.draw()); state.drops.forEach(d => d.draw());
             for (let i = state.projectiles.length - 1; i >= 0; i--) { state.projectiles[i].update(dtFactor); if (state.projectiles[i].isDead) state.projectiles.splice(i, 1); else state.projectiles[i].draw(); }
-            for (let i = state.particles.length - 1; i >= 0; i--) { const p = state.particles[i]; p.x += p.vx * dtFactor; p.y += p.vy * dtFactor; p.alpha -= p.decay * dtFactor; if (p.alpha <= 0) state.particles.splice(i, 1); else { ctx.save(); ctx.globalAlpha = p.alpha; ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2); ctx.fill(); ctx.restore(); } }
+            for (let i = state.particles.length - 1; i >= 0; i--) {
+                const p = state.particles[i];
+                p.x += p.vx * dtFactor; p.y += p.vy * dtFactor; p.alpha -= p.decay * dtFactor;
+                if (p.growth) p.radius += p.growth * dtFactor;
+                if (p.alpha <= 0) state.particles.splice(i, 1);
+                else {
+                    ctx.save(); ctx.globalAlpha = p.alpha;
+                    if (p.type === 'ring') {
+                        ctx.strokeStyle = p.color; ctx.lineWidth = 3;
+                        ctx.beginPath(); ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2); ctx.stroke();
+                    } else {
+                        ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2); ctx.fill();
+                    }
+                    ctx.restore();
+                }
+            }
             state.players.forEach(p => p.draw()); requestAnimationFrame(gameLoop);
         }
 
