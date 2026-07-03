@@ -212,7 +212,7 @@
 
         // --- 分節劍氣類別 ---
         class BladeWave {
-            constructor(x, y, angle, ownerId, color, spinValue = 0) {
+            constructor(x, y, angle, ownerId, color) {
                 this.x = x; this.y = y; this.angle = angle;
                 this.ownerId = ownerId; this.color = color;
                 const stats = CONFIG.bladeWave;
@@ -222,7 +222,6 @@
                 this.radius = stats.radius;
                 this.startTime = Date.now();
                 this.isDead = false;
-                this.curveAmount = spinValue * 0.09;
                 this.segments = [];
                 for (let i = 0; i < stats.segments; i++) {
                     this.segments.push({ isAlive: true });
@@ -232,9 +231,6 @@
             }
 
             update(dtFactor) {
-                if (this.curveAmount) {
-                    this.angle += this.curveAmount * dtFactor;
-                }
                 this.x += Math.cos(this.angle) * this.speed * dtFactor;
                 this.y += Math.sin(this.angle) * this.speed * dtFactor;
                 if (Date.now() - this.startTime > this.life) { this.isDead = true; return; }
@@ -302,7 +298,7 @@
 
         // --- 一般子彈類別 ---
         class Bullet {
-            constructor(x, y, angle, level, ownerId, color, spinValue = 0) {
+            constructor(x, y, angle, level, ownerId, color) {
                 this.x = x; this.y = y; this.angle = angle;
                 this.ownerId = ownerId; this.color = color;
                 let stats = CONFIG.bulletLv1;
@@ -310,12 +306,8 @@
                 this.level = level;
                 this.radius = stats.size; this.damage = stats.damage; this.speed = stats.speed; this.life = stats.life;
                 this.startTime = Date.now(); this.isDead = false;
-                this.curveAmount = spinValue * 0.15;
             }
             update(dtFactor) {
-                if (this.curveAmount) {
-                    this.angle += this.curveAmount * dtFactor;
-                }
                 this.x += Math.cos(this.angle) * this.speed * dtFactor;
                 this.y += Math.sin(this.angle) * this.speed * dtFactor;
                 if (Date.now() - this.startTime > this.life) this.isDead = true;
@@ -440,7 +432,6 @@
                 this.isCharging = false; this.chargeValue = 0;
                 this.hasPlayedChargeCompleteEffect = false;
                 this.scaleX = 1; this.scaleY = 1;
-                this.angleHistory = [];
                 this.guardPointActiveUntil = 0;
             }
 
@@ -486,17 +477,7 @@
                                 }
                             }
 
-                            // Calculate spinValue
-                            let spinValue = 0;
-                            if (this.angleHistory && this.angleHistory.length >= 4) {
-                                let totalDelta = 0;
-                                for (let i = 1; i < this.angleHistory.length; i++) {
-                                    totalDelta += angleDelta(this.angleHistory[i], this.angleHistory[i - 1]);
-                                }
-                                spinValue = totalDelta / (this.angleHistory.length - 1);
-                            }
-
-                            state.projectiles.push(new BladeWave(this.x, this.y, this.angle, this.id, this.color, spinValue));
+                            state.projectiles.push(new BladeWave(this.x, this.y, this.angle, this.id, this.color));
                             const rMag = CONFIG.bladeWave.recoilMag;
                             const pDelay = CONFIG.bladeWave.postDelay;
                             if (!hasCoffee) this.stamina -= CONFIG.skillCostBlade;
@@ -537,7 +518,7 @@
                                 this.melee.hasHit = true;
                             }
 
-                            // 瞄準與緩慢轉向更新
+                            // 瞄準中即時朝向 Cursor / 蘑菇頭方向
                             let targetAngle = this.angle;
                             if (this.id === 'P1') targetAngle = Math.atan2(state.mouse.y - this.y, state.mouse.x - this.x);
                             else {
@@ -554,14 +535,8 @@
                                 this.isCharging = true;
                                 this.chargeValue = 0;
                                 this.hasPlayedChargeCompleteEffect = false;
-                                // snap instantly to face mouse/gamepad when entering charge
-                                this.angle = targetAngle;
-                            } else {
-                                // rotate slowly towards targetAngle at ~480 degrees/second
-                                const maxTurn = 0.2396 * dtFactor; // 480 deg/s = ~0.1396 rad per frame at 60fps
-                                const diff = angleDelta(targetAngle, this.angle);
-                                this.angle += Math.max(-maxTurn, Math.min(maxTurn, diff));
                             }
+                            this.angle = targetAngle;
                             if (this.chargeValue < 1.0) {
                                 let currentChargeSpeed = (16.66 / CONFIG.skillMaxChargeTime);
                                 this.chargeValue += currentChargeSpeed * dtFactor;
@@ -586,21 +561,13 @@
                     if (this.isAiming) {
                         let rMag = 0, pDelay = 0;
                         let fired = false;
-                        let spinValue = 0;
-                        if (this.angleHistory && this.angleHistory.length >= 4) {
-                            let totalDelta = 0;
-                            for (let i = 1; i < this.angleHistory.length; i++) {
-                                totalDelta += angleDelta(this.angleHistory[i], this.angleHistory[i - 1]);
-                            }
-                            spinValue = totalDelta / (this.angleHistory.length - 1);
-                        }
                         if (this.chargeValue > 0.9) {
-                            state.projectiles.push(new BladeWave(this.x, this.y, this.angle, this.id, this.color, spinValue));
+                            state.projectiles.push(new BladeWave(this.x, this.y, this.angle, this.id, this.color));
                             rMag = CONFIG.bladeWave.recoilMag; pDelay = CONFIG.bladeWave.postDelay;
                             if (!hasCoffee) this.stamina -= CONFIG.skillCostBlade;
                             fired = true;
                         } else if (this.stamina >= CONFIG.skillCostNormal || hasCoffee) {
-                            state.projectiles.push(new Bullet(this.x, this.y, this.angle, 1, this.id, this.color, spinValue));
+                            state.projectiles.push(new Bullet(this.x, this.y, this.angle, 1, this.id, this.color));
                             rMag = CONFIG.bulletLv1.recoil; pDelay = CONFIG.bulletLv1.postDelay;
                             if (!hasCoffee) this.stamina -= CONFIG.skillCostNormal;
                             fired = true;
@@ -750,12 +717,6 @@
                     }
                 }
 
-                // Update angle history to track rotation velocity
-                if (!this.angleHistory) this.angleHistory = [];
-                this.angleHistory.push(this.angle);
-                if (this.angleHistory.length > 10) {
-                    this.angleHistory.shift();
-                }
             }
 
             startDash(now, dir) {
